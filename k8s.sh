@@ -1,100 +1,174 @@
 #!/bin/bash
 
-echo -e "\n🔍 Kubernetes Pentest Recon Script by 𝘌𝘹𝘱𝘦𝘳𝘵 𝘗𝘦𝘯𝘵𝘦𝘴𝘵𝘦𝘳"
-echo "==========================================================="
+# Colors
+green() { echo -e "\e[32m$1\e[0m"; }
+red()   { echo -e "\e[31m$1\e[0m"; }
+yellow(){ echo -e "\e[33m$1\e[0m"; }
 
-# General system info
-echo -e "\n📦 Container Info"
-whoami
+separator() {
+  echo -e "\n\e[34m🔹─────────────────────────────────────────────────────────────🔹\e[0m\n"
+}
+
+banner() {
+  echo -e "\n\e[1;36m🚀 Kubernetes Pentest Recon Script v2 — by AkilerrrrrR 🧠\e[0m"
+  echo -e "\e[1;36m===============================================================\e[0m\n"
+}
+
+banner
+
+############################################################
+# 📦 CONTAINER / ENVIRONMENT INFO
+############################################################
+separator
+green "📦 Container Environment Info"
 id
-hostname
-cat /etc/os-release 2>/dev/null
+cat /etc/os-release
 uname -a
-ps aux --forest
 
-# Check if running in a container
-echo -e "\n🚪 Environment Detection"
-grep -qa 'docker\|kubepods' /proc/1/cgroup && echo "✅ Running inside a container." || echo "❌ Not in a container."
+############################################################
+# 🚪 CONTAINER ENVIRONMENT DETECTION
+############################################################
+separator
+green "🚪 Environment Detection"
+[[ -f /.dockerenv ]] && green "✅ Inside a Docker container." || yellow "⚠️ Possibly not Docker (checking cgroup)"
+grep -q docker /proc/1/cgroup && green "✅ Docker cgroup detected." || red "❌ Not in Docker (via cgroup)"
 
-# Check for Docker socket mount (escape vector)
-echo -e "\n🔓 Docker Socket Mount Check"
-[[ -S /var/run/docker.sock ]] && echo "⚠️ Docker socket is mounted!" || echo "✅ No Docker socket found."
+############################################################
+# 📂 FILESYSTEM & MOUNTS
+############################################################
+separator
+green "📂 Filesystem & Writable Mounts"
+mount | grep overlay
+[ -w /tmp ] && green "✅ /tmp is writable" || red "❌ /tmp is not writable"
+[ -w /dev/shm ] && green "✅ /dev/shm is writable" || red "❌ /dev/shm is not writable"
+mount | grep -E '/host|/rootfs|/etc/hostname|/etc/kubernetes'
 
-# Host mount check
-echo -e "\n🗂️ Host Mount Check"
-mount | grep -E ' /host|/proc|/sys|/var' || echo "✅ No suspicious host mounts detected."
+############################################################
+# 🛡️ SECURITY CONTROLS & CAPABILITIES
+############################################################
+separator
+green "🛡️ Security Controls"
+[ "$(id -u)" -eq 0 ] && green "✅ Running as root" || red "❌ Not running as root"
 
-# Capabilities check
-echo -e "\n🛠️ Linux Capabilities"
-capsh --print 2>/dev/null || echo "capsh not found"
+capsh --print | grep "Bounding set" | grep -q cap_sys_admin && green "✅ cap_sys_admin present" || red "❌ No cap_sys_admin"
 
-# Privileged container check
-echo -e "\n🛡️ Privileged Container Check"
-if [ "$(grep 'CapEff' /proc/$$/status | cut -d':' -f2 | tr -d ' ')" = "ffffffffffffffff" ]; then
-  echo "⚠️ Full capabilities: likely a privileged container"
+[ -e /var/run/docker.sock ] && red "❌ Docker socket exposed!" || green "✅ No Docker socket"
+
+[[ -x "$(command -v apparmor_status)" ]] && apparmor_status=$(apparmor_status | grep "enabled") && green "✅ AppArmor enabled" || red "❌ AppArmor not found or disabled"
+grep -q Seccomp /proc/self/status && green "✅ Seccomp enabled" || red "❌ Seccomp not enabled"
+
+############################################################
+# 🔑 ESCAPE TOOLS CHECK
+############################################################
+separator
+green "🔑 Escape Tools & SUID Binaries"
+for tool in nsenter chroot mount pivot_root fuser umount; do
+    command -v $tool &>/dev/null && green "✔️ $tool found" || red "❌ $tool missing"
+done
+find / -perm -4000 -type f 2>/dev/null
+
+############################################################
+# 💡 ESCAPE / HOST ENUMERATION ATTEMPTS
+############################################################
+separator
+green "💡 Host Escape Checks"
+cat /proc/1/cgroup
+ls -l /proc/1/ns
+nsenter -t 1 -m -u -i -n -p -w &>/dev/null && red "❌ Host namespace pivot worked!" || green "✅ Namespace isolation intact"
+mount -o bind / /mnt &>/dev/null && red "❌ Able to bind host root to /mnt" || green "✅ Cannot bind host root"
+
+[ -w / ] && green "✅ / is writable" || red "❌ Root filesystem is read-only"
+
+############################################################
+# 🔐 SERVICE ACCOUNT & KUBERNETES API ACCESS
+############################################################
+separator
+green "🔐 Kubernetes Service Account Info"
+SA_PATH="/var/run/secrets/kubernetes.io/serviceaccount"
+if [[ -f "$SA_PATH/token" ]]; then
+    green "✅ Service account mounted"
+    echo "Namespace: $(cat $SA_PATH/namespace)"
+    echo "Token (first 50 chars): $(head -c 50 $SA_PATH/token)..."
+    openssl x509 -in $SA_PATH/ca.crt -text -noout | grep Subject
 else
-  echo "✅ Capabilities seem limited"
+    green "✅ No service account token mounted"
 fi
 
-# AppArmor / Seccomp
-echo -e "\n🔐 AppArmor / Seccomp"
-aa_status 2>/dev/null || echo "AppArmor not available"
-grep Seccomp /proc/self/status
+green "🌐 Kubernetes API Access Test"
+kubectl cluster-info &>/dev/null && green "✅ Kubernetes API reachable" || red "❌ API not reachable"
+kubectl get secrets &>/dev/null && green "✅ Secrets accessible" || red "❌ Cannot access secrets"
+kubectl get pods -A -o wide &>/dev/null && green "✅ Pod listing possible" || red "❌ Pod enumeration blocked"
 
-# Service Account token
-echo -e "\n🔑 Service Account Token Check"
-if [ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]; then
-  echo "⚠️ Service account token exists!"
-  echo "Namespace: $(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)"
-  echo -e "\n--- Token Snippet ---"
-  head -c 100 /var/run/secrets/kubernetes.io/serviceaccount/token && echo "..."
-else
-  echo "✅ No service account token found."
-fi
+############################################################
+# ☁️ CLOUD METADATA SERVICES
+############################################################
+separator
+green "☁️ Cloud Metadata Detection"
+curl -s -H "Metadata-Flavor: Google" http://169.254.169.254/computeMetadata/v1/instance/ && red "❌ GCP Metadata reachable"
+curl -s http://169.254.169.254/metadata/instance?api-version=2021-02-01 -H Metadata:true && red "❌ Azure Metadata reachable"
+curl -s http://169.254.169.254/latest/dynamic/instance-identity/document && red "❌ AWS Metadata reachable"
 
-# Kubernetes API check
-echo -e "\n🌐 Kubernetes API Access Test"
-KUBE_HOST="${KUBERNETES_SERVICE_HOST:-kubernetes.default.svc}"
-curl -s --connect-timeout 2 "https://$KUBE_HOST" || echo "❌ Kubernetes API not reachable from here."
+############################################################
+# 🧬 ENV VARS, SSH, HISTORY
+############################################################
+separator
+green "🧬 Environment & Secrets Discovery"
+env | grep -iE "token|key|secret|pass" || green "✅ No obvious secrets in ENV"
 
-# Check if curl can hit metadata server (cloud provider escape)
-echo -e "\n🌩️ Cloud Metadata Service Test"
-curl -s --connect-timeout 2 http://169.254.169.254 || echo "✅ No cloud metadata service reachable"
+green "🔑 SSH Keys and Configs"
+find / -name "id_rsa" -o -name "authorized_keys" 2>/dev/null
 
-# Namespace/Pod info
-echo -e "\n📦 Pod/Namespace Info"
-[ -x "$(command -v kubectl)" ] && kubectl get pods -A 2>/dev/null || echo "kubectl not available inside container"
+green "📜 History Files"
+find / -name ".*history" 2>/dev/null
 
-# Secrets enumeration
-echo -e "\n🗝️ Kubernetes Secrets Check (if access exists)"
-[ -x "$(command -v kubectl)" ] && kubectl get secrets -A 2>/dev/null || echo "No access or kubectl not present"
+############################################################
+# 📄 KUBECONFIG, KUBELET, ETC
+############################################################
+separator
+green "📄 Kubelet & kubeconfig Discovery"
+find / -name "kubeconfig" -o -name "config" -path "*/.kube/*" 2>/dev/null
+ls -la /etc/kubernetes 2>/dev/null
+ls -la /var/lib/kubelet 2>/dev/null
 
-# DNS resolution
-echo -e "\n🔎 DNS Test"
-nslookup kubernetes.default.svc 2>/dev/null || dig kubernetes.default.svc || echo "DNS lookup failed"
+############################################################
+# 📡 KUBELET EXPLOIT ATTEMPTS
+############################################################
+separator
+green "📡 Kubelet Service Checks"
+curl -k https://localhost:10250/metrics &>/dev/null && red "❌ kubelet metrics exposed"
+curl -k https://localhost:10250/pods &>/dev/null && red "❌ kubelet pods endpoint exposed"
 
-# Auditd & Falco evasion checks
-echo -e "\n🚨 Runtime Monitoring Detection"
-pgrep -fl auditd
-pgrep -fl falco
-
-# File system checks
-echo -e "\n🪓 Writable /tmp or /dev/shm (for payloads)"
-for d in /tmp /dev/shm; do
-  [ -w "$d" ] && echo "✅ Writable: $d" || echo "❌ Not writable: $d"
+############################################################
+# 🧭 NETWORK & DNS
+############################################################
+separator
+green "🧭 DNS & Networking"
+command -v dig &>/dev/null && dig google.com &>/dev/null && green "✅ DNS works" || red "❌ DNS broken"
+for port in 80 443 10250; do
+    timeout 1 bash -c "cat < /dev/null > /dev/tcp/127.0.0.1/$port" &>/dev/null && red "❌ Port $port open on localhost" || green "✅ Port $port closed"
 done
 
-# Tools check
-echo -e "\n🧰 Tools Installed"
-for bin in curl wget nc bash python3 python socat nmap; do
-  command -v $bin >/dev/null && echo "✔️ $bin found" || echo "❌ $bin missing"
+############################################################
+# 🧰 TOOLSET CHECK
+############################################################
+separator
+green "🧰 Tools Installed"
+for tool in curl wget nc bash python3 python socat nmap dig nsenter; do
+    command -v $tool &>/dev/null && green "✔️ $tool found" || red "❌ $tool missing"
 done
 
-# Escape attempt suggestion (manual)
-echo -e "\n💡 Escape Attempt Suggestions (Manual)"
-echo "- Check: nsenter, chroot, mount, pivot_root"
-echo "- Try mapping host namespaces if allowed"
-echo "- Try mounting /proc or /rootfs"
-echo "- Check for writable docker.sock"
-
-echo -e "\n✅ Enumeration complete. Time to dig deeper manually..."
+############################################################
+# 🧨 FINAL NOTES & EXPLOIT SUGGESTIONS
+############################################################
+separator
+green "🧨 Final Manual Suggestions"
+cat <<EOF
+- Try bind mounting /host or /proc if accessible.
+- Upload and run escape exploits (dirty pipe, dirty cow, etc.).
+- Check service account token against API access: kubectl auth can-i --list
+- If Docker/Containerd socket is exposed, use mounting/privileged container trick.
+- Use kubectl proxy or kubelet ports for SSRF or RCE.
+- Pivot to adjacent containers via shared mounts or cloud metadata access.
+EOF
+separator
+green "🎯 Done — Recon complete!"
